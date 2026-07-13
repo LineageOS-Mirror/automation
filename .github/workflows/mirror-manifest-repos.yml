@@ -1,0 +1,121 @@
+name: Mirror LineageOS repos from manifest
+
+on:
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Dry run (no repo creation/push, just print plan)"
+        required: false
+        default: "false"
+
+env:
+  # ---- EDIT IF NEEDED ----
+  TARGET_ORG: LineageOS-Mirror
+  MANIFEST_REPO: LineageOS-Mirror/android
+  UPSTREAM_FALLBACK: https://github.com/LineageOS
+  # -------------------------
+  BRANCH: lineage-24.0
+  MANIFEST_FILE: default.xml
+
+jobs:
+  mirror:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout manifest
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ env.MANIFEST_REPO }}
+          ref: ${{ env.BRANCH }}
+          token: ${{ secrets.GH_PAT }}
+          path: manifest
+
+      - name: Parse default.xml
+        id: parse
+        run: |
+          python3 - <<'PYEOF'
+          import xml.etree.ElementTree as ET
+          import json, os
+
+          tree = ET.parse(f"manifest/{os.environ['MANIFEST_FILE']}")
+          root = tree.getroot()
+
+          remotes = {}
+          default_remote = None
+          default_revision = os.environ["BRANCH"]
+
+          for r in root.findall("remote"):
+              remotes[r.get("name")] = r.get("fetch")
+
+          d = root.find("default")
+          if d is not None:
+              default_remote = d.get("remote")
+
+          projects = []
+          for p in root.findall("project"):
+              name = p.get("name")
+              if not name or not name.startswith("LineageOS/"):
+                  continue
+              path = p.get("path") or name
+              remote_name = p.get("remote") or default_remote
+              fetch = remotes.get(remote_name, "")
+              revision = p.get("revision") or default_revision
+              if fetch.startswith("http"):
+                  clone_url = f"{fetch.rstrip('/')}/{name}.git"
+              else:
+                  clone_url = f"{os.environ['UPSTREAM_FALLBACK'].rstrip('/')}/{name}.git"
+              projects.append({
+                  "name": name,
+                  "path": path,
+                  "clone_url": clone_url,
+                  "revision": revision,
+              })
+
+          with open("projects.json", "w") as f:
+              json.dump(projects, f, indent=2)
+
+          print(f"Parsed {len(projects)} projects")
+          PYEOF
+
+      - name: Mirror each project
+        env:
+          GH_TOKEN: ${{ secrets.GH_PAT }}
+          DRY_RUN: ${{ github.event.inputs.dry_run }}
+        run: |
+          set -e
+          jq -c '.[]' projects.json | while read -r row; do
+            NAME=$(echo "$row" | jq -r '.name')
+            CLONE_URL=$(echo "$row" | jq -r '.clone_url')
+            REVISION=$(echo "$row" | jq -r '.revision')
+
+            REPO_NAME=$(basename "$NAME")
+
+            echo "== $NAME -> $TARGET_ORG/$REPO_NAME (branch: $REVISION) =="
+
+            if [ "$DRY_RUN" = "true" ]; then
+              echo "[dry-run] would create+push $TARGET_ORG/$REPO_NAME from $CLONE_URL@$REVISION"
+              continue
+            fi
+
+            if ! gh repo view "$TARGET_ORG/$REPO_NAME" >/dev/null 2>&1; then
+              echo "Creating $TARGET_ORG/$REPO_NAME"
+              gh repo create "$TARGET_ORG/$REPO_NAME" --private -y
+            else
+              echo "$TARGET_ORG/$REPO_NAME already exists, skipping creation"
+            fi
+
+            rm -rf /tmp/work && mkdir -p /tmp/work && cd /tmp/work
+            git clone --branch "$REVISION" --single-branch "$CLONE_URL" src || {
+              echo "WARN: branch $REVISION not found on $CLONE_URL, skipping $NAME"
+              cd -
+              continue
+            }
+            cd src
+
+            git remote add mirror "https://x-access-token:${GH_TOKEN}@github.com/$TARGET_ORG/$REPO_NAME.git"
+            git push mirror "HEAD:refs/heads/$REVISION" --force
+
+            gh api -X PATCH "repos/$TARGET_ORG/$REPO_NAME" -f default_branch="$REVISION" >/dev/null || \
+              echo "WARN: could not set default branch for $REPO_NAME (maybe branch not seen yet)"
+
+            cd /
+          done
