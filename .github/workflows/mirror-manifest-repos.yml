@@ -76,7 +76,7 @@ jobs:
           print(f"Parsed {len(projects)} projects")
           PYEOF
 
-      - name: Mirror each project
+      - name: Fork each project
         env:
           GH_TOKEN: ${{ secrets.GH_PAT }}
           DRY_RUN: ${{ github.event.inputs.dry_run }}
@@ -84,38 +84,32 @@ jobs:
           set -e
           jq -c '.[]' projects.json | while read -r row; do
             NAME=$(echo "$row" | jq -r '.name')
-            CLONE_URL=$(echo "$row" | jq -r '.clone_url')
             REVISION=$(echo "$row" | jq -r '.revision')
 
-            REPO_NAME=$(basename "$NAME")
+            OWNER=$(dirname "$NAME")
+            REPO=$(basename "$NAME")
 
-            echo "== $NAME -> $TARGET_ORG/$REPO_NAME (branch: $REVISION) =="
+            echo "== forking $OWNER/$REPO -> $TARGET_ORG/$REPO (default branch: $REVISION) =="
 
             if [ "$DRY_RUN" = "true" ]; then
-              echo "[dry-run] would create+push $TARGET_ORG/$REPO_NAME from $CLONE_URL@$REVISION"
+              echo "[dry-run] would fork $OWNER/$REPO into org $TARGET_ORG, then set default branch to $REVISION"
               continue
             fi
 
-            if ! gh repo view "$TARGET_ORG/$REPO_NAME" >/dev/null 2>&1; then
-              echo "Creating $TARGET_ORG/$REPO_NAME"
-              gh repo create "$TARGET_ORG/$REPO_NAME" --private -y
+            if gh repo view "$TARGET_ORG/$REPO" >/dev/null 2>&1; then
+              echo "$TARGET_ORG/$REPO already exists, skipping fork"
             else
-              echo "$TARGET_ORG/$REPO_NAME already exists, skipping creation"
+              gh api -X POST "repos/$OWNER/$REPO/forks" -f organization="$TARGET_ORG" >/dev/null
+              echo "Fork requested for $OWNER/$REPO, waiting for it to become available..."
+              for i in $(seq 1 30); do
+                if gh repo view "$TARGET_ORG/$REPO" >/dev/null 2>&1; then
+                  break
+                fi
+                sleep 5
+              done
             fi
 
-            rm -rf /tmp/work && mkdir -p /tmp/work && cd /tmp/work
-            git clone --branch "$REVISION" --single-branch "$CLONE_URL" src || {
-              echo "WARN: branch $REVISION not found on $CLONE_URL, skipping $NAME"
-              cd -
-              continue
-            }
-            cd src
+            gh api -X PATCH "repos/$TARGET_ORG/$REPO" -f default_branch="$REVISION" >/dev/null || \
+              echo "WARN: could not set default branch to $REVISION for $REPO (does that branch exist upstream?)"
 
-            git remote add mirror "https://x-access-token:${GH_TOKEN}@github.com/$TARGET_ORG/$REPO_NAME.git"
-            git push mirror "HEAD:refs/heads/$REVISION" --force
-
-            gh api -X PATCH "repos/$TARGET_ORG/$REPO_NAME" -f default_branch="$REVISION" >/dev/null || \
-              echo "WARN: could not set default branch for $REPO_NAME (maybe branch not seen yet)"
-
-            cd /
           done
