@@ -9,11 +9,9 @@ on:
         default: "false"
 
 env:
-  # ---- EDIT IF NEEDED ----
   TARGET_ORG: LineageOS-Mirror
   MANIFEST_REPO: LineageOS-Mirror/android
   UPSTREAM_FALLBACK: https://github.com/LineageOS
-  # -------------------------
   BRANCH: lineage-24.0
   MANIFEST_FILE: default.xml
 
@@ -28,6 +26,11 @@ jobs:
           ref: ${{ env.BRANCH }}
           token: ${{ secrets.GH_PAT }}
           path: manifest
+
+      - name: Checkout automation repo (for remove.xml)
+        uses: actions/checkout@v4
+        with:
+          path: automation
 
       - name: Parse default.xml
         id: parse
@@ -50,10 +53,26 @@ jobs:
           if d is not None:
               default_remote = d.get("remote")
 
+          skip_names = set()
+          remove_path = "automation/manifest/snippets/remove.xml"
+          if os.path.exists(remove_path):
+              rtree = ET.parse(remove_path)
+              for rp in rtree.getroot().findall("remove-project"):
+                  n = rp.get("name")
+                  if n:
+                      skip_names.add(n)
+              print(f"Loaded {len(skip_names)} names to skip from remove.xml")
+          else:
+              print("No remove.xml found, skipping nothing")
+
           projects = []
+          skipped = []
           for p in root.findall("project"):
               name = p.get("name")
               if not name or not name.startswith("LineageOS/"):
+                  continue
+              if name in skip_names:
+                  skipped.append(name)
                   continue
               path = p.get("path") or name
               remote_name = p.get("remote") or default_remote
@@ -73,7 +92,7 @@ jobs:
           with open("projects.json", "w") as f:
               json.dump(projects, f, indent=2)
 
-          print(f"Parsed {len(projects)} projects")
+          print(f"Parsed {len(projects)} projects, skipped {len(skipped)}: {skipped}")
           PYEOF
 
       - name: Fork each project

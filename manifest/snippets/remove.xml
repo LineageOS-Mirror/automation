@@ -1,0 +1,13 @@
+<manifest>
+  <remove-project name="LineageOS/android_bootable_deprecated-ota" />
+  <remove-project name="LineageOS/android_device_generic_car" />
+  <remove-project name="LineageOS/android_device_generic_common" />
+  <remove-project name="LineageOS/android_device_generic_goldfish" />
+  <remove-project name="LineageOS/android_device_google_atv" />
+  <remove-project name="LineageOS/android_device_google_car" />
+  <remove-project name="LineageOS/android_packages_apps_Car_Settings" />
+  <remove-project name="LineageOS/android_packages_apps_Car_SystemUI" />
+  <remove-project name="LineageOS/android_packages_apps_TvSettings" />
+  <remove-project name="LineageOS/android_packages_apps_TvSystemUI" />
+  <remove-project name="LineageOS/android_packages_services_Car" />
+</manifest>
