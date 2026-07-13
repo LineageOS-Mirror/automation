@@ -1,0 +1,87 @@
+name: Sync LineageOS-Mirror forks with upstream
+
+on:
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Dry run (just print plan, no sync)"
+        required: false
+        default: "false"
+
+env:
+  TARGET_ORG: LineageOS-Mirror
+  MANIFEST_REPO: LineageOS-Mirror/android
+  BRANCH: lineage-24.0
+  MANIFEST_FILE: default.xml
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout manifest
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ env.MANIFEST_REPO }}
+          ref: ${{ env.BRANCH }}
+          token: ${{ secrets.GH_PAT }}
+          path: manifest
+
+      - name: Parse default.xml
+        run: |
+          python3 - <<'PYEOF'
+          import xml.etree.ElementTree as ET
+          import json, os
+
+          tree = ET.parse(f"manifest/{os.environ['MANIFEST_FILE']}")
+          root = tree.getroot()
+
+          projects = []
+          for p in root.findall("project"):
+              name = p.get("name")
+              if not name or not name.startswith("LineageOS/"):
+                  continue
+              revision = p.get("revision") or os.environ["BRANCH"]
+              projects.append({"name": name, "revision": revision})
+
+          with open("projects.json", "w") as f:
+              json.dump(projects, f, indent=2)
+
+          print(f"Parsed {len(projects)} projects")
+          PYEOF
+
+      - name: Sync each fork with upstream
+        env:
+          GH_TOKEN: ${{ secrets.GH_PAT }}
+          DRY_RUN: ${{ github.event.inputs.dry_run }}
+        run: |
+          set -e
+          jq -c '.[]' projects.json | while read -r row; do
+            NAME=$(echo "$row" | jq -r '.name')
+            REVISION=$(echo "$row" | jq -r '.revision')
+            REPO=$(basename "$NAME")
+
+            echo "== syncing $TARGET_ORG/$REPO ($REVISION) =="
+
+            if [ "$DRY_RUN" = "true" ]; then
+              echo "[dry-run] would sync $TARGET_ORG/$REPO branch $REVISION with upstream"
+              continue
+            fi
+
+            if ! gh repo view "$TARGET_ORG/$REPO" >/dev/null 2>&1; then
+              echo "WARN: $TARGET_ORG/$REPO doesn't exist yet (run the fork workflow first), skipping"
+              continue
+            fi
+
+            RESULT=$(gh api -X POST "repos/$TARGET_ORG/$REPO/merge-upstream" \
+              -f branch="$REVISION" 2>&1) && {
+                MSG=$(echo "$RESULT" | jq -r '.message // "synced"')
+                echo "OK: $REPO -> $MSG"
+              } || {
+                echo "WARN: $REPO could not fast-forward sync (likely diverged - you have local commits on $REVISION, or branch doesn't exist). Skipping to avoid overwriting your work."
+                echo "  raw: $RESULT"
+              }
+          done
+
+      - name: Summary
+        if: always()
+        run: echo "Sync run complete. Check step above for per-repo OK/WARN lines."
