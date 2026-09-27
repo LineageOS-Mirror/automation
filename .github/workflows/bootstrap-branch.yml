@@ -1,0 +1,134 @@
+name: Bootstrap branch on LineageOS-Mirror forks
+
+on:
+  workflow_dispatch:
+    inputs:
+      branch:
+        description: "Branch to bootstrap (e.g. lineage-24.0). Leave blank to use default."
+        required: false
+        default: ""
+      dry_run:
+        description: "Dry run (just print plan, no push)"
+        required: false
+        default: "false"
+
+env:
+  TARGET_ORG: LineageOS-Mirror
+  MANIFEST_REPO: LineageOS-Mirror/android_manifest
+  BRANCH: lineage-24.0
+  MANIFEST_FILE: default.xml
+
+jobs:
+  bootstrap:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Resolve branch
+        run: |
+          BRANCH_INPUT="${{ github.event.inputs.branch }}"
+          if [ -n "$BRANCH_INPUT" ]; then
+            echo "BRANCH=$BRANCH_INPUT" >> "$GITHUB_ENV"
+          fi
+          echo "Using branch: ${BRANCH_INPUT:-$BRANCH}"
+
+      - name: Checkout manifest
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ env.MANIFEST_REPO }}
+          ref: ${{ env.BRANCH }}
+          token: ${{ secrets.GH_PAT }}
+          path: manifest
+
+      - name: Checkout automation repo (for remove.xml)
+        uses: actions/checkout@v4
+        with:
+          path: automation
+
+      - name: Parse default.xml
+        run: |
+          python3 - <<'PYEOF'
+          import xml.etree.ElementTree as ET
+          import json, os
+
+          tree = ET.parse(f"manifest/{os.environ['MANIFEST_FILE']}")
+          root = tree.getroot()
+
+          skip_names = set()
+          remove_path = "automation/manifest/snippets/remove.xml"
+          if os.path.exists(remove_path):
+              rtree = ET.parse(remove_path)
+              for rp in rtree.getroot().findall("remove-project"):
+                  n = rp.get("name")
+                  if n:
+                      skip_names.add(n)
+              print(f"Loaded {len(skip_names)} names to skip from remove.xml")
+          else:
+              print("No remove.xml found, skipping nothing")
+
+          projects = []
+          skipped = []
+          for p in root.findall("project"):
+              name = p.get("name")
+              if not name or not name.startswith("LineageOS/"):
+                  continue
+              if name in skip_names:
+                  skipped.append(name)
+                  continue
+              revision = p.get("revision") or os.environ["BRANCH"]
+              projects.append({"name": name, "revision": revision})
+
+          with open("projects.json", "w") as f:
+              json.dump(projects, f, indent=2)
+
+          print(f"Parsed {len(projects)} projects, skipped {len(skipped)}: {skipped}")
+          PYEOF
+
+      - name: Ensure branch exists in fork, else create from upstream
+        env:
+          GH_TOKEN: ${{ secrets.GH_PAT }}
+          DRY_RUN: ${{ github.event.inputs.dry_run }}
+        run: |
+          set -e
+          jq -c '.[]' projects.json | while read -r row; do
+            NAME=$(echo "$row" | jq -r '.name')
+            REVISION=$(echo "$row" | jq -r '.revision')
+            REPO=$(basename "$NAME")
+
+            if ! gh repo view "$TARGET_ORG/$REPO" >/dev/null 2>&1; then
+              echo "SKIP: $TARGET_ORG/$REPO doesn't exist yet (not forked), run the fork workflow first"
+              continue
+            fi
+
+            if gh api "repos/$TARGET_ORG/$REPO/branches/$REVISION" >/dev/null 2>&1; then
+              echo "OK: $REPO already has branch $REVISION"
+              continue
+            fi
+
+            echo "== $REPO missing branch $REVISION locally, bootstrapping from upstream =="
+
+            if [ "$DRY_RUN" = "true" ]; then
+              echo "[dry-run] would fetch $NAME:$REVISION from upstream and push to $TARGET_ORG/$REPO"
+              continue
+            fi
+
+            rm -rf /tmp/bootstrap && mkdir -p /tmp/bootstrap
+            cd /tmp/bootstrap
+
+            git init -q
+            git remote add upstream "https://github.com/${NAME}.git"
+            git remote add fork "https://x-access-token:${GH_TOKEN}@github.com/${TARGET_ORG}/${REPO}.git"
+
+            if ! git fetch --depth=1 upstream "$REVISION"; then
+              echo "WARN: upstream $NAME has no branch $REVISION, skipping"
+              cd - >/dev/null
+              continue
+            fi
+
+            git push fork "FETCH_HEAD:refs/heads/$REVISION"
+            echo "OK: created $REVISION on $TARGET_ORG/$REPO from upstream"
+
+            cd - >/dev/null
+          done
+
+      - name: Summary
+        if: always()
+        run: echo "Bootstrap run complete. Check step above for per-repo OK/WARN/SKIP lines."
