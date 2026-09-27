@@ -10,7 +10,7 @@ on:
 
 env:
   TARGET_ORG: LineageOS-Mirror
-  MANIFEST_REPO: LineageOS-Mirror/android
+  MANIFEST_REPO: LineageOS-Mirror/android_manifest
   UPSTREAM_FALLBACK: https://github.com/LineageOS
   BRANCH: lineage-24.0
   MANIFEST_FILE: default.xml
